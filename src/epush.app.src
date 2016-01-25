@@ -1,0 +1,12 @@
+{application, epush,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { epush_app, []}},
+  {env, [{listeners,[{mqtt,6379,[]},{mqtt,[{packet,{}}]}]}]}
+ ]}.

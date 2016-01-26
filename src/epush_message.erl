@@ -81,7 +81,7 @@ from_packet(ClientId, Packet) ->
 msgid(?QOS_0) ->
   undefined;
 msgid(Qos) when Qos =:= ?QOS_1 orelse Qos =:= ?QOS_2 ->
-  emqttd_guid:gen().
+  epush_guid:gen().
 
 %%------------------------------------------------------------------------------
 %% @doc Message to packet

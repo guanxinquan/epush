@@ -1,11 +1,11 @@
 -module(epush_app).
 
--behaviour(application).
-
 %% Application callbacks
--export([start/0, stop/1,start_listeners/0,stop_listeners/0,is_running/1]).
+-export([start/0, stop/1,start_listeners/0,stop_listeners/0,is_running/1,start/2]).
 
--define(APP,?MODULE).
+-behavior(application).
+
+-define(APP,epush).
 
 -define(MQTT_SOCKOPTS, [
     binary,
@@ -22,9 +22,9 @@
 env(Group) ->
     application:get_env(?APP, Group, []).
 
--spec env(atom(), atom()) -> undefined | any().
-env(Group, Name) ->
-    proplists:get_value(Name, env(Group)).
+%%-spec env(atom(), atom()) -> undefined | any().
+%%env(Group, Name) ->
+%%    proplists:get_value(Name, env(Group)).
 
 
 
@@ -32,17 +32,20 @@ env(Group, Name) ->
 start() ->%启动app
     application:start(?APP).
 
+start(_Type,_) ->
+    start_listeners(),
+    {ok,self()}.
+
 -spec start_listeners() -> any().
 start_listeners() ->%启动listeners
     {ok, Listeners} = application:get_env(?APP, listeners),
     lists:foreach(fun start_listener/1, Listeners).
 
--spec start_listener(listener()) -> any().
 start_listener({mqtt, Port, Options}) ->
     start_listener(mqtt, Port, Options).
 
 start_listener(Protocol, Port, Options) ->
-    MFArgs = {emqttd_client, start_link, [env(mqtt)]},
+    MFArgs = {epush_client, start_link, []},
     esockd:open(Protocol, Port, merge_sockopts(Options) , MFArgs).
 
 

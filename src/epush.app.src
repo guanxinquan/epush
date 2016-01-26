@@ -1,12 +1,12 @@
 {application, epush,
  [
-  {description, ""},
+  {description, "erlang push sync system"},
   {vsn, "1"},
   {registered, []},
   {applications, [
                   kernel,
-                  stdlib
+                  stdlib,
+                  esockd
                  ]},
-  {mod, { epush_app, []}},
-  {env, [{listeners,[{mqtt,6379,[]},{mqtt,[{packet,{}}]}]}]}
- ]}.
+  {mod, {epush_app, []}},
+  {env, [{listeners,[{mqtt,6379,[]}]}]}]}.

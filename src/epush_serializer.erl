@@ -13,7 +13,7 @@
 %% @doc Serialise MQTT Packet
 %% @end
 %%------------------------------------------------------------------------------
--spec serialize(mqtt_packet()) -> binary().
+-spec serialize(mqtt_packet()) -> binary().%%由三部分组成,header,variable(可变头部),payload
 serialize(#mqtt_packet{header = Header = #mqtt_packet_header{type = Type},
   variable = Variable,
   payload  = Payload}) ->

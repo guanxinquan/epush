@@ -9,7 +9,7 @@
 -include("epush_internal.hrl").
 
 %% API Function Exports
--export([start_link/2,kick/1]).
+-export([start_link/2,start_link/1,kick/1]).
 
 
 
@@ -37,7 +37,11 @@
 -define(LOG(Level, Format, Args, State),
   lager:Level("Client(~s): " ++ Format, [State#client_state.connname | Args])).
 
+start_link(Connection) ->
+  start_link(Connection,[{client,[]},{packet,[]}]).
+
 start_link(Connection, MqttEnv) -> %Connection是连接,对应esockd_connection
+  io:format("connect arrival ~p~n",[Connection]),
   {ok, proc_lib:spawn_link(?MODULE, init, [[Connection, MqttEnv]])}.
 
 kick(CPid) ->

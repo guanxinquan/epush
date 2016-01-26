@@ -36,19 +36,19 @@
 %% @doc Init protocol
 %% @end
 %%------------------------------------------------------------------------------
-init(Peername, SendFun, Opts) ->
+init(Peername, SendFun, Opts) ->%%初始化
   MaxLen = epush_opts:g(max_clientid_len, Opts, ?MAX_CLIENTID_LEN),
-  WsInitialHeaders = emqttd_opts:g(ws_initial_headers, Opts),
+  WsInitialHeaders = epush_opts:g(ws_initial_headers, Opts),
   #proto_state{peername           = Peername,
     sendfun            = SendFun,
     max_clientid_len   = MaxLen,
     client_pid         = self(),
     ws_initial_headers = WsInitialHeaders}.
 
-info(ProtoState) ->
+info(ProtoState) ->%%获取对应的info
   ?record_to_proplist(proto_state, ProtoState, ?INFO_KEYS).
 
-clientid(#proto_state{client_id = ClientId}) ->
+clientid(#proto_state{client_id = ClientId}) ->%%获取clientId
   ClientId.
 
 %%计算will topic,返回mqtt_client, mqtt_client与proto_state只差一个willMsg
@@ -96,19 +96,15 @@ received(_Packet, State = #proto_state{connected = false}) ->%如果没有处理
 
 received(Packet = ?PACKET(_Type), State) ->%其它类型的消息
   trace(recv, Packet, State),
-  case validate_packet(Packet) of
-    ok ->
-      process(Packet, State);
-    {error, Reason} ->
-      {error, Reason, State}
-  end.
+  process(Packet, State).
 
+%%处理连接消息
 process(Packet = ?CONNECT_PACKET(Var), State0) ->
 
   #mqtt_packet_connect{proto_ver  = ProtoVer,
     proto_name = ProtoName,
     username   = Username,
-    password   = Password,
+    password   = _Password,
     clean_sess = CleanSess,
     keep_alive = KeepAlive,
     client_id  = ClientId} = Var,
@@ -127,81 +123,66 @@ process(Packet = ?CONNECT_PACKET(Var), State0) ->
   {ReturnCode1, SessPresent, State3} =
     case validate_connect(Var, State1) of
       ?CONNACK_ACCEPT ->
-        case emqttd_access_control:auth(client(State1), Password) of%验证用户信息
-          ok ->
-            %% Generate clientId if null
-            State2 = maybe_set_clientid(State1),%%如果clientId是空,那么生成id,State2与State1比最多差clientId
+        %% Generate clientId if null
+        State2 = maybe_set_clientid(State1),%%如果clientId是空,那么生成id,State2与State1比最多差clientId
+        %% todo register and send sync message
+        %% Start session
+        %%case push_sm:start_session(CleanSess, clientid(State2)) of
+          %%{ok, Session, SP} ->
+            %% Register the client
+            %%epush_cm:register(client(State2)),
+            %% Start keepalive
+            start_keepalive(KeepAlive),
+            %% ACCEPT
+            {?CONNACK_ACCEPT, true, State2#proto_state{}};
+        %%end;
 
-            %% Start session
-            case emqttd_sm:start_session(CleanSess, clientid(State2)) of
-              {ok, Session, SP} ->
-                %% Register the client
-                emqttd_cm:register(client(State2)),
-                %% Start keepalive
-                start_keepalive(KeepAlive),
-                %% ACCEPT
-                {?CONNACK_ACCEPT, SP, State2#proto_state{session = Session}};
-              {error, Error} ->
-                exit({shutdown, Error})
-            end;
-          {error, Reason}->
-            ?LOG(error, "Username '~s' login failed for ~p", [Username, Reason], State1),
-            {?CONNACK_CREDENTIALS, false, State1}
-        end;
       ReturnCode ->
         {ReturnCode, false, State1}
     end,
   %% Run hooks
-  emqttd_broker:foreach_hooks('client.connected', [ReturnCode1, client(State3)]),
+  %% epush_broker:foreach_hooks('client.connected', [ReturnCode1, client(State3)]),
   %% Send connack
-  send(?CONNACK_PACKET(ReturnCode1, sp(SessPresent)), State3);
+  send(?CONNACK_PACKET(ReturnCode1, sp(SessPresent)), State3);%%调用mqtt_packet
 
-process(Packet = ?PUBLISH_PACKET(_Qos, Topic, _PacketId, _Payload), State) ->
-  case check_acl(publish, Topic, client(State)) of
-    allow ->
-      publish(Packet, State);
-    deny ->
-      ?LOG(error, "Cannot publish to ~s for ACL Deny", [Topic], State)
-  end,
+process(Packet = ?PUBLISH_PACKET(_Qos, _Topic, _PacketId, _Payload), State) ->
+  publish(Packet, State),
   {ok, State};
 
-process(?PUBACK_PACKET(?PUBACK, PacketId), State = #proto_state{session = Session}) ->
-  emqttd_session:puback(Session, PacketId),
+process(?PUBACK_PACKET(?PUBACK, _PacketId), State = #proto_state{session = _Session}) ->
+  %% todo sync
+  %% epush_session:puback(Session, PacketId),
   {ok, State};
 
-process(?PUBACK_PACKET(?PUBREC, PacketId), State = #proto_state{session = Session}) ->
-  emqttd_session:pubrec(Session, PacketId),
-  send(?PUBREL_PACKET(PacketId), State);
+process(?PUBACK_PACKET(?PUBREC, _PacketId), State = #proto_state{session = _Session}) ->
+  %% todo nothing
+  {ok,State};
 
-process(?PUBACK_PACKET(?PUBREL, PacketId), State = #proto_state{session = Session}) ->
-  emqttd_session:pubrel(Session, PacketId),
-  send(?PUBACK_PACKET(?PUBCOMP, PacketId), State);
+process(?PUBACK_PACKET(?PUBREL, _PacketId), State = #proto_state{session = _Session}) ->
+  %% todo nothing
+  {ok,State};
 
-process(?PUBACK_PACKET(?PUBCOMP, PacketId), State = #proto_state{session = Session})->
-  emqttd_session:pubcomp(Session, PacketId), {ok, State};
+
+process(?PUBACK_PACKET(?PUBCOMP, _PacketId), State = #proto_state{session = _Session})->
+  %% todo nothing
+  {ok, State};
+
 
 %% Protect from empty topic table
-process(?SUBSCRIBE_PACKET(PacketId, []), State) ->
-  send(?SUBACK_PACKET(PacketId, []), State);
+process(?SUBSCRIBE_PACKET(_PacketId, []), State) ->
+  %%send(?SUBACK_PACKET(PacketId, []), State);
+  %% todo nothing
+  {ok,State};
 
-process(?SUBSCRIBE_PACKET(PacketId, TopicTable), State = #proto_state{session = Session}) ->
-  Client = client(State),
-  AllowDenies = [check_acl(subscribe, Topic, Client) || {Topic, _Qos} <- TopicTable],
-  case lists:member(deny, AllowDenies) of
-    true ->
-      ?LOG(error, "Cannot SUBSCRIBE ~p for ACL Deny", [TopicTable], State),
-      send(?SUBACK_PACKET(PacketId, [16#80 || _ <- TopicTable]), State);
-    false ->
-      emqttd_session:subscribe(Session, PacketId, TopicTable), {ok, State}
-  end;
+process(?SUBSCRIBE_PACKET(_PacketId, _TopicTable), State = #proto_state{session = _Session}) ->
+  {ok,State};%%nothing
 
 %% Protect from empty topic list
-process(?UNSUBSCRIBE_PACKET(PacketId, []), State) ->
-  send(?UNSUBACK_PACKET(PacketId), State);
+process(?UNSUBSCRIBE_PACKET(_PacketId, []), State) ->
+  {ok,State}; %%nothing
 
-process(?UNSUBSCRIBE_PACKET(PacketId, Topics), State = #proto_state{session = Session}) ->
-  emqttd_session:unsubscribe(Session, Topics),
-  send(?UNSUBACK_PACKET(PacketId), State);
+process(?UNSUBSCRIBE_PACKET(_PacketId, _Topics), State = #proto_state{session = _Session}) ->
+  {ok,State}; %%nothing
 
 process(?PACKET(?PINGREQ), State) ->
   send(?PACKET(?PINGRESP), State);
@@ -210,9 +191,11 @@ process(?PACKET(?DISCONNECT), State) ->
   % Clean willmsg
   {stop, normal, State#proto_state{will_msg = undefined}}.
 
-publish(Packet = ?PUBLISH_PACKET(?QOS_0, _PacketId),
-    #proto_state{client_id = ClientId, session = Session}) ->
-  emqttd_session:publish(Session, emqttd_message:from_packet(ClientId, Packet));
+publish(_Packet = ?PUBLISH_PACKET(?QOS_0, _PacketId),
+    #proto_state{client_id = _ClientId, session = _Session}) ->
+  %%_session:publish(Session, epush_message:from_packet(ClientId, Packet));
+  %% todo send publish message to message queue
+  ok;
 
 publish(Packet = ?PUBLISH_PACKET(?QOS_1, _PacketId), State) ->
   with_puback(?PUBACK, Packet, State);
@@ -221,9 +204,10 @@ publish(Packet = ?PUBLISH_PACKET(?QOS_2, _PacketId), State) ->
   with_puback(?PUBREC, Packet, State).
 
 with_puback(Type, Packet = ?PUBLISH_PACKET(_Qos, PacketId),
-    State = #proto_state{client_id = ClientId, session = Session}) ->
-  Msg = emqttd_message:from_packet(ClientId, Packet),
-  case emqttd_session:publish(Session, Msg) of
+    State = #proto_state{client_id = ClientId, session = _Session}) ->
+  _Msg = epush_message:from_packet(ClientId, Packet),
+  %% todo send publish message to message queue
+  case ok of %_session:publish(Session, Msg) of
     ok ->
       send(?PUBACK_PACKET(Type, PacketId), State);
     {error, Error} ->
@@ -234,19 +218,19 @@ with_puback(Type, Packet = ?PUBLISH_PACKET(_Qos, PacketId),
 send(Msg, State) when is_record(Msg, mqtt_message) ->
   send(epush_message:to_packet(Msg), State);
 
-send(Packet, State = #proto_state{sendfun = SendFun})
+send(Packet, State = #proto_state{sendfun = SendFun})%%接收的是mqtt_packet
   when is_record(Packet, mqtt_packet) ->
   trace(send, Packet, State),
-  Data = epush_serializer:serialize(Packet),
+  Data = epush_serializer:serialize(Packet),%变成binary
   ?LOG(debug, "SEND ~p", [Data], State),
-  SendFun(Data),
+  SendFun(Data),%发送数据
   {ok, State}.
 
 trace(recv, Packet, ProtoState) ->
-  ?LOG(info, "RECV ~s", [emqttd_packet:format(Packet)], ProtoState);
+  ?LOG(info, "RECV ~s", [epush_packet:format(Packet)], ProtoState);
 
 trace(send, Packet, ProtoState) ->
-  ?LOG(info, "SEND ~s", [emqttd_packet:format(Packet)], ProtoState).
+  ?LOG(info, "SEND ~s", [epush_packet:format(Packet)], ProtoState).
 
 %% @doc redeliver PUBREL PacketId
 redeliver({?PUBREL, PacketId}, State) ->
@@ -260,28 +244,29 @@ shutdown(_Error, #proto_state{client_id = undefined}) ->
 shutdown(conflict, #proto_state{client_id = _ClientId}) ->
   %%todo 需要unreigister
   %% let it down
-  %% emqttd_cm:unregister(ClientId);
+  %% _cm:unregister(ClientId);
   %% 这里认为clientId会被覆写掉
   ignore.
 
 
 willmsg(Packet) when is_record(Packet, mqtt_packet_connect) ->
-  emqttd_message:from_packet(Packet).
+  epush_message:from_packet(Packet).
 
 %% Generate a client if if nulll
 maybe_set_clientid(State = #proto_state{client_id = NullId})
   when NullId =:= undefined orelse NullId =:= <<>> ->
-  {_, NPid, _} = emqttd_guid:new(),%如果clientId是空,那么生成一个ObjectId(与mongodb的id生成策略相似)
-  ClientId = iolist_to_binary(["emqttd_", integer_to_list(NPid)]),
+  {_, NPid, _} = epush_guid:new(),%如果clientId是空,那么生成一个ObjectId(与mongodb的id生成策略相似)
+  ClientId = iolist_to_binary(["epush_", integer_to_list(NPid)]),
   State#proto_state{client_id = ClientId};
 
 maybe_set_clientid(State) ->
   State.
 
-send_willmsg(_ClientId, undefined) ->
-  ignore;
-send_willmsg(ClientId, WillMsg) ->
-  emqttd_pubsub:publish(WillMsg#mqtt_message{from = ClientId}).
+%%send_willmsg(_ClientId, undefined) ->
+%%  ignore;
+%%send_willmsg(ClientId, WillMsg) ->
+%%  %%epush_pubsub:publish(WillMsg#mqtt_message{from = ClientId}).
+%%  ignore.
 
 start_keepalive(0) -> ignore;
 
@@ -323,61 +308,6 @@ validate_clientid(#mqtt_packet_connect{proto_ver  = ProtoVer,
   ?LOG(warning, "Invalid clientId. ProtoVer: ~p, CleanSess: ~s",
     [ProtoVer, CleanSess], ProtoState),
   false.
-
-validate_packet(?PUBLISH_PACKET(_Qos, Topic, _PacketId, _Payload)) ->
-  case emqttd_topic:validate({name, Topic}) of
-    true  -> ok;
-    false -> {error, badtopic}
-  end;
-
-validate_packet(?SUBSCRIBE_PACKET(_PacketId, TopicTable)) ->
-  validate_topics(filter, TopicTable);
-
-validate_packet(?UNSUBSCRIBE_PACKET(_PacketId, Topics)) ->
-  validate_topics(filter, Topics);
-
-validate_packet(_Packet) ->
-  ok.
-
-validate_topics(_Type, []) ->
-  {error, empty_topics};
-
-validate_topics(Type, TopicTable = [{_Topic, _Qos}|_])
-  when Type =:= name orelse Type =:= filter ->
-  Valid = fun(Topic, Qos) ->
-    emqttd_topic:validate({Type, Topic}) and validate_qos(Qos)
-          end,
-  case [Topic || {Topic, Qos} <- TopicTable, not Valid(Topic, Qos)] of
-    [] -> ok;
-    _  -> {error, badtopic}
-  end;
-
-validate_topics(Type, Topics = [Topic0|_]) when is_binary(Topic0) ->
-  case [Topic || Topic <- Topics, not emqttd_topic:validate({Type, Topic})] of
-    [] -> ok;
-    _  -> {error, badtopic}
-  end.
-
-validate_qos(undefined) ->
-  true;
-validate_qos(Qos) when ?IS_QOS(Qos) ->
-  true;
-validate_qos(_) ->
-  false.
-
-%% PUBLISH ACL is cached in process dictionary.
-check_acl(publish, Topic, Client) ->
-  case get({acl, publish, Topic}) of
-    undefined ->
-      AllowDeny = emqttd_access_control:check_acl(Client, publish, Topic),
-      put({acl, publish, Topic}, AllowDeny),
-      AllowDeny;
-    AllowDeny ->
-      AllowDeny
-  end;
-
-check_acl(subscribe, Topic, Client) ->
-  emqttd_access_control:check_acl(Client, subscribe, Topic).
 
 sp(true)  -> 1;
 sp(false) -> 0.

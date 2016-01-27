@@ -8,6 +8,8 @@
 
 -include("epush_internal.hrl").
 
+-include("epush_mq.hrl").
+
 %% API
 -export([init/3, info/1, clientid/1, client/1, session/1]).
 
@@ -21,7 +23,7 @@
   proto_ver, proto_name, username,
   will_msg, keepalive, max_clientid_len = ?MAX_CLIENTID_LEN,
   session, ws_initial_headers, %% Headers from first HTTP request for websocket client
-  connected_at}).
+  connected_at,authored = false,channels}).
 
 -type proto_state() :: #proto_state{}.
 
@@ -104,7 +106,7 @@ process(Packet = ?CONNECT_PACKET(Var), State0) ->
   #mqtt_packet_connect{proto_ver  = ProtoVer,
     proto_name = ProtoName,
     username   = Username,
-    password   = _Password,
+    password   = Password,
     clean_sess = CleanSess,
     keep_alive = KeepAlive,
     client_id  = ClientId} = Var,
@@ -125,24 +127,18 @@ process(Packet = ?CONNECT_PACKET(Var), State0) ->
       ?CONNACK_ACCEPT ->
         %% Generate clientId if null
         State2 = maybe_set_clientid(State1),%%如果clientId是空,那么生成id,State2与State1比最多差clientId
-        %% todo register and send sync message
-        %% Start session
-        %%case push_sm:start_session(CleanSess, clientid(State2)) of
-          %%{ok, Session, SP} ->
-            %% Register the client
-            %%epush_cm:register(client(State2)),
-            %% Start keepalive
-            start_keepalive(KeepAlive),
-            %% ACCEPT
-            {?CONNACK_ACCEPT, true, State2#proto_state{}};
+        epush_rabbit:sendMsg(#login{username = Username,password = Password,pid = self(),clientId = ClientId}),
+        ChannelMap = [{ChannelName,SyncTag} || S <- re:split(State1#proto_state.will_msg,";"),[ChannelName,SyncTag] = re:split(S,",")],
+        Channels = lists:foldl(fun({ChannelName,SyncTag},AccMap) ->
+          maps:put(ChannelName,SyncTag,AccMap)
+                               end,maps:new(),ChannelMap),
+        start_keepalive(KeepAlive),
+        %% ACCEPT
+        {?CONNACK_ACCEPT, true, State2#proto_state{channels = Channels}};
         %%end;
-
       ReturnCode ->
         {ReturnCode, false, State1}
     end,
-  %% Run hooks
-  %% epush_broker:foreach_hooks('client.connected', [ReturnCode1, client(State3)]),
-  %% Send connack
   send(?CONNACK_PACKET(ReturnCode1, sp(SessPresent)), State3);%%调用mqtt_packet
 
 process(Packet = ?PUBLISH_PACKET(_Qos, _Topic, _PacketId, _Payload), State) ->

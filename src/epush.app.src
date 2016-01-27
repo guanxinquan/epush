@@ -9,4 +9,7 @@
                   esockd
                  ]},
   {mod, {epush_app, []}},
-  {env, [{listeners,[{mqtt,6379,[]}]}]}]}.
+  {env, [
+    {listeners,[{mqtt,6379,[]}]},
+    {rabbit,[{hosts,"localhost"},{vhost,<<"epush">>},{username,<<"epush">>},{password,<<"epush">>},{exchange,<<"epush-sync">>},{route,<<"epush-sync-queue">>}]}
+    ]}]}.

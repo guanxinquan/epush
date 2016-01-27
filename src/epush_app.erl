@@ -34,7 +34,7 @@ start() ->%启动app
 
 start(_Type,_) ->
     start_listeners(),
-    {ok,self()}.
+    epush_sup:start_link().
 
 -spec start_listeners() -> any().
 start_listeners() ->%启动listeners

@@ -25,6 +25,7 @@
     conn_state,
     rate_limit,
     parser_fun,
+    pktid = 1,
     proto_state,  %%protocol相关的信息 例如clientId
     packet_opts,
     keepalive     %%用的是epush_keepalive, 初始化的后,指定时间间隔发送{keepalive,check}消息,处理时调用epush_keepalive的check,判断的是前后两次检查,inet的接收字节数是否发生变化
@@ -103,6 +104,22 @@ handle_info({deliver, Message}, State) ->
     epush_protocol:send(Message, ProtoState)%里面会调用sendFun
                    end, State);
 
+handle_info({sync,Channel},State=#client_state{proto_state = ProtoState}) ->%% 来自于服务端有新消息到来时调用的sync
+  epush_protocol:send_sync({sync,Channel},ProtoState),
+  hibernate(State);
+
+handle_info({mssage,Channel,OTag,NTag,Body},State=#client_state{proto_state = ProtoState}) ->%%来自于服务端的消息发送
+  NProtoState = epush_protocol:send_message({message,Channel,OTag,NTag,Body},ProtoState),
+  hibernate(State#client_state{proto_state = NProtoState});
+
+handle_info({timeout, awaiting_ack, {Ch,Tag}},State = #client_state{proto_state = ProtoState}) ->%%来自于timer
+  case epush_protocol:resend_message({Ch,Tag},ProtoState) of
+    {ok,NProtoState} ->
+      hibernate(State#client_state{proto_state = NProtoState});
+    {error,Reason} ->%%重试次数过多,直接断开连接
+      shutdown(Reason,State)
+  end;
+
 handle_info({shutdown, conflict, {ClientId, NewPid}}, State) ->
   ?LOG(warning, "clientid '~s' conflict with ~p", [ClientId, NewPid], State),
   shutdown(conflict, State);
@@ -153,6 +170,8 @@ handle_info({keepalive, check}, State = #client_state{keepalive = KeepAlive}) ->
       ?LOG(warning, "Keepalive error - ~p", [Error], State),
       shutdown(Error, State)
   end;
+
+
 
 handle_info(Info, State) ->
   ?UNEXPECTED_INFO(Info, State).

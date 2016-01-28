@@ -28,9 +28,7 @@ init([]) ->
     Vhost = proplists:get_value(vhost,Rabbit,epush),
     Username = proplists:get_value(username,Rabbit,epush),
     Password = proplists:get_value(password,Rabbit,epush),
-    Exchange = proplists:get_value(exchange,Rabbit,epush),
-    Route = proplists:get_value(route,Rabbit,epush),
     {ok, { {one_for_one, 1, 60000}, [
-        {epush_rabbit,{epush_rabbit,start_link,[Hosts,Vhost,Username,Password,Exchange,Route]},permanent,infinity,worker,[epush_rabbit]}
+        {epush_rabbit,{epush_rabbit,start_link,[Hosts,Vhost,Username,Password]},permanent,infinity,worker,[epush_rabbit]}
     ]} }.
 

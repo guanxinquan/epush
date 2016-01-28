@@ -18,9 +18,6 @@
 %% Application callbacks
 %% ===================================================================
 
--spec env(atom()) -> list().
-env(Group) ->
-    application:get_env(?APP, Group, []).
 
 %%-spec env(atom(), atom()) -> undefined | any().
 %%env(Group, Name) ->

@@ -15,7 +15,7 @@
 
 -export([received/2, send/2, redeliver/2, shutdown/2]).
 
--export([process/2]).
+-export([process/2,send_message/2,send_sync/2,resend_message/2,channel/1]).
 
 %% Protocol State
 -record(proto_state, {peername, sendfun, connected = false,
@@ -23,7 +23,7 @@
   proto_ver, proto_name, username,
   will_msg, keepalive, max_clientid_len = ?MAX_CLIENTID_LEN,
   session, ws_initial_headers, %% Headers from first HTTP request for websocket client
-  connected_at,authored = false,channels}).
+  connected_at,authored = false,password,channels,awaiting_rel,timeout=240,flights=maps:new()}).
 
 -type proto_state() :: #proto_state{}.
 
@@ -33,6 +33,8 @@
 -define(LOG(Level, Format, Args, State),
   lager:Level([{client, State#proto_state.client_id}], "Client(~s@~s): " ++ Format,
     [State#proto_state.client_id, esockd_net:format(State#proto_state.peername) | Args])).
+
+-define(TOPIC(Packet),Packet#mqtt_packet.variable#mqtt_packet_publish.topic_name).
 
 %%------------------------------------------------------------------------------
 %% @doc Init protocol
@@ -127,11 +129,9 @@ process(Packet = ?CONNECT_PACKET(Var), State0) ->
       ?CONNACK_ACCEPT ->
         %% Generate clientId if null
         State2 = maybe_set_clientid(State1),%%如果clientId是空,那么生成id,State2与State1比最多差clientId
-        epush_rabbit:sendMsg(#login{username = Username,password = Password,pid = self(),clientId = ClientId}),
-        ChannelMap = [{ChannelName,SyncTag} || S <- re:split(State1#proto_state.will_msg,";"),[ChannelName,SyncTag] = re:split(S,",")],
-        Channels = lists:foldl(fun({ChannelName,SyncTag},AccMap) ->
-          maps:put(ChannelName,SyncTag,AccMap)
-                               end,maps:new(),ChannelMap),
+        Channels = channel(State2#proto_state.will_msg),%%计算channel
+        io:format("channels is ~p ~n",[Channels]),
+        epush_rabbit:sendMsg(#login{username = Username,password = Password,pid = self(),clientId = ClientId,channel = Channels}),
         start_keepalive(KeepAlive),
         %% ACCEPT
         {?CONNACK_ACCEPT, true, State2#proto_state{channels = Channels}};
@@ -141,33 +141,34 @@ process(Packet = ?CONNECT_PACKET(Var), State0) ->
     end,
   send(?CONNACK_PACKET(ReturnCode1, sp(SessPresent)), State3);%%调用mqtt_packet
 
-process(Packet = ?PUBLISH_PACKET(_Qos, _Topic, _PacketId, _Payload), State) ->
-  publish(Packet, State),
-  {ok, State};
+process(Packet = ?PUBLISH_PACKET(Qos, _Topic, _PacketId, _Payload), State) ->
+  if Qos =:= 0 ->
+      publishQos0(Packet,State);
+    Qos =:= 1 ->
+      publishQos1(Packet,State)
+  end;
 
 process(?PUBACK_PACKET(?PUBACK, _PacketId), State = #proto_state{session = _Session}) ->
-  %% todo sync
-  %% epush_session:puback(Session, PacketId),
+  %% do nothing
   {ok, State};
 
 process(?PUBACK_PACKET(?PUBREC, _PacketId), State = #proto_state{session = _Session}) ->
-  %% todo nothing
+  %% do nothing
   {ok,State};
 
 process(?PUBACK_PACKET(?PUBREL, _PacketId), State = #proto_state{session = _Session}) ->
-  %% todo nothing
+  %% do nothing
   {ok,State};
 
 
 process(?PUBACK_PACKET(?PUBCOMP, _PacketId), State = #proto_state{session = _Session})->
-  %% todo nothing
+  %% do nothing
   {ok, State};
 
 
 %% Protect from empty topic table
 process(?SUBSCRIBE_PACKET(_PacketId, []), State) ->
-  %%send(?SUBACK_PACKET(PacketId, []), State);
-  %% todo nothing
+  %% do nothing
   {ok,State};
 
 process(?SUBSCRIBE_PACKET(_PacketId, _TopicTable), State = #proto_state{session = _Session}) ->
@@ -187,28 +188,41 @@ process(?PACKET(?DISCONNECT), State) ->
   % Clean willmsg
   {stop, normal, State#proto_state{will_msg = undefined}}.
 
-publish(_Packet = ?PUBLISH_PACKET(?QOS_0, _PacketId),
-    #proto_state{client_id = _ClientId, session = _Session}) ->
-  %%_session:publish(Session, epush_message:from_packet(ClientId, Packet));
-  %% todo send publish message to message queue
-  ok;
-
-publish(Packet = ?PUBLISH_PACKET(?QOS_1, _PacketId), State) ->
-  with_puback(?PUBACK, Packet, State);
-
-publish(Packet = ?PUBLISH_PACKET(?QOS_2, _PacketId), State) ->
-  with_puback(?PUBREC, Packet, State).
-
-with_puback(Type, Packet = ?PUBLISH_PACKET(_Qos, PacketId),
-    State = #proto_state{client_id = ClientId, session = _Session}) ->
-  _Msg = epush_message:from_packet(ClientId, Packet),
-  %% todo send publish message to message queue
-  case ok of %_session:publish(Session, Msg) of
-    ok ->
-      send(?PUBACK_PACKET(Type, PacketId), State);
-    {error, Error} ->
-      ?LOG(error, "PUBLISH ~p error: ~p", [PacketId, Error], State)
+%% qos0的消息,这里被当作ack的消息
+publishQos0(Packet = ?PUBLISH_PACKET(?QOS_0, _PacketId),
+    State = #proto_state{client_id = _ClientId, channels = Channels,username = UserName,flights = Flights,awaiting_rel = AwaitRel}) ->%%客户端上行的Qos0消息,实际上是ack消息
+  {Ch,Tag} = topic_channel(?TOPIC(Packet)),%%通过分析topic,获取ack消息的信息(消息由两部分组成,ch+tag,中间用逗号隔开
+  case maps:find(Ch,Flights) of %% 先要找到指定的flight消息
+    {ok,{FTag,_Msg,_Cnt}} ->
+      if Tag =:= FTag ->%% flight消息与ack的消息一致,说明响应的就是这条消息
+        maps:remove(Ch,Flights),%% 删除flight消息
+        NewAwaitRel = cancel_retry(Ch,AwaitRel),%% 删除Retry消息
+        NewChannels = update_channel(Ch,Tag,Channels),%% 更新channel的tag值
+        epush_rabbit:sendMsg(#sync{channel = Ch,syncTag = Tag, username = UserName, pid = self()}),
+        {ok,State#proto_state{channels = NewChannels,awaiting_rel = NewAwaitRel}};
+        true ->%% 否则响应的不适这条消息,直接丢弃
+          {ok,State}
+      end;
+    error ->
+      {ok,State}
   end.
+
+
+
+
+publishQos1(Packet = ?PUBLISH_PACKET(?QOS_1, _PacketId), State) ->%%客户端上行Qos1消息,实际是客户想发送的消息
+    epush_rabbit:sendMsg(
+      #pub{
+        message = Packet#mqtt_packet.payload,
+        username = State#proto_state.username,
+        password = State#proto_state.password,
+        pid = self(),
+        channel = ?TOPIC(Packet)}),%%publish 消息
+  with_puback(?PUBACK, Packet, State).
+
+with_puback(Type,?PUBLISH_PACKET(_Qos, PacketId), State) ->
+  send(?PUBACK_PACKET(Type, PacketId), State),
+  {ok,State}.
 
 -spec send(mqtt_message() | mqtt_packet(), proto_state()) -> {ok, proto_state()}.
 send(Msg, State) when is_record(Msg, mqtt_message) ->
@@ -237,11 +251,8 @@ redeliver({?PUBREL, PacketId}, State) ->
 shutdown(_Error, #proto_state{client_id = undefined}) ->
   ignore;
 
-shutdown(conflict, #proto_state{client_id = _ClientId}) ->
-  %%todo 需要unreigister
-  %% let it down
-  %% _cm:unregister(ClientId);
-  %% 这里认为clientId会被覆写掉
+shutdown(conflict, #proto_state{username = Username,client_id = ClientId}) ->
+  epush_rabbit:sendMsg(#logout{username = Username, pid = self(), clientId = ClientId}),%%unregister
   ignore.
 
 
@@ -304,6 +315,119 @@ validate_clientid(#mqtt_packet_connect{proto_ver  = ProtoVer,
   ?LOG(warning, "Invalid clientId. ProtoVer: ~p, CleanSess: ~s",
     [ProtoVer, CleanSess], ProtoState),
   false.
+
+%%通过willMessage获取Channel信息
+channel(TopicStr) ->
+  if TopicStr =:= undefined orelse TopicStr =:= <<>> ->
+    undefined;
+    true ->
+      lists:foldl(
+        fun(Topic,AccIn) ->
+          [ChannelName,SyncTag] = string:tokens(Topic,","),
+          maps:put(ChannelName,SyncTag,AccIn)
+        end,maps:new(),string:tokens(TopicStr,";")
+      )
+  end.
+
+topic_channel(Topic) ->
+  if Topic =:= undefined orelse Topic =:= <<>> ->
+    undefined;
+     true ->
+      try
+        [ChannelName,SyncTag] = string:tokens(Topic,","),
+        {ChannelName,SyncTag}
+      catch
+        _:_ -> {Topic,undefined}
+      end
+
+  end.
+
+%%如果来了一条消息,仅当
+check_channel(Ch,OTag,Channels,Flights) ->
+  case maps:find(Ch,Flights) of%% 如果对应channel上仍然有消息没有发送成功,那么丢弃当前消息
+    {ok,_} ->
+      false;
+    error ->
+      case maps:find(Ch,Channels) of%% 如果对应channel上没有消息,并且当前消息的tag与传入的Tag相等,那么验证通过,发送消息
+        {ok,CurrTag} ->
+          if CurrTag =:= OTag ->%%
+            true;
+            true ->
+              false
+          end
+      end
+  end.
+
+send_sync({sync,Channel},#proto_state{channels = Channels,username = UserName,flights = Flights}) ->
+  case maps:find(Channel,Flights) of
+    {ok,_} ->%%如果通道上,还有消息未发送成功,那么忽略当前sync
+      ignore;
+    error ->%%如果通道上没有消息,那么可以发送sync
+      case maps:find(Channel,Channels) of
+        {ok,Tag} ->%% 如果当前session有这个channel,那么直接返回响应的tag
+          epush_rabbit:sendMsg(#sync{channel = Channel,syncTag = Tag,pid = self(),username = UserName});
+        error ->%% 如果当前session没有这个channel,那么tag返回的是undefined
+          epush_rabbit:sendMsg(#sync{channel = Channel,syncTag = undefined,pid=self(),username = UserName})
+      end
+  end.
+
+
+send_message({message,Channel,OTag,NTag,Body},ProtoState=#proto_state{channels = Channels,awaiting_rel = AwaitRel,timeout = Timeout,flights = Flights}) ->
+  case check_channel(Channel,OTag,Channels,Flights) of%看看通道上是否有消息,如果没有消息才能发送
+    true ->
+      Msg = #mqtt_message{topic = Channel,payload = Body,qos = 0,dup = false},%创建消息
+      TRef = timer(Timeout,{timeout,awaiting_ack,{Channel,NTag}}),%设定重新尝试的时间
+      AwaitRel1 = maps:put(Channel,{TRef,NTag},AwaitRel),
+      self() ! {deliver,Msg},%发送消息
+      ProtoState#proto_state{awaiting_rel = AwaitRel1,flights = maps:put(Channel,{NTag,Msg,1})};
+    _ ->
+      ProtoState
+  end.
+
+
+
+resend_message({Ch,Tag},ProtoState=#proto_state{flights = Flights,awaiting_rel = AwaitRel,timeout = Timeout}) ->
+ case maps:find(ch,AwaitRel) of
+   {ok,{_Ref,Tag}} ->%% 先删除await
+     maps:remove(ch,AwaitRel);
+   _ ->
+     ok
+ end,
+  case maps:find(ch,Flights) of
+    {Tag,Msg,1} ->%% 找到对应的消息
+      TRef = timer(Timeout,{timeout,awaiting_ack,{Ch,Tag}}),%设定重新尝试的时间
+      AwaitRel1 = maps:put(Ch,{TRef,Tag},AwaitRel),
+      self() ! {deliver,Msg},%发送消息
+      {ok,ProtoState#proto_state{awaiting_rel = AwaitRel1,flights = maps:put(Ch,{Tag,Msg,2})}};
+    _ ->
+      {error,retry_send_error}%%重发次数过多,直接断开连接
+  end.
+
+cancel_retry(Ch,AwaitRel) ->
+  case maps:find(Ch,AwaitRel) of
+    {ok,TRef} ->
+      cancel_timer(TRef),
+      maps:remove(Ch,AwaitRel);
+    error ->
+      AwaitRel
+  end.
+
+cancel_timer(undefined) ->
+  undefined;
+cancel_timer(Ref) ->
+    catch erlang:cancel_timer(Ref).
+
+update_channel(Ch,Tag,Channels) ->
+  case maps:is_key(Ch) of
+    true ->
+      maps:update(Ch,Tag,Channels);
+    flase ->
+      Channels
+  end.
+
+
+timer(TimeoutSec, TimeoutMsg) ->
+  erlang:send_after(timer:seconds(TimeoutSec), self(), TimeoutMsg).
 
 sp(true)  -> 1;
 sp(false) -> 0.

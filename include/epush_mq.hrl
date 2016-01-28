@@ -18,6 +18,7 @@
 
 
 -record(sync,{
+  channel,
   syncTag,
   username,
   pid
@@ -26,11 +27,14 @@
 
 -record(logout,{
   username,
-  pid
+  pid,
+  clientId
 }).
 
 -record(pub,{
   username,
-  token,
-  pid
+  password,
+  pid,
+  message,
+  channel
 }).

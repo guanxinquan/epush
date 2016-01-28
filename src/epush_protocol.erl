@@ -105,12 +105,14 @@ received(Packet = ?PACKET(_Type), State) ->%其它类型的消息
 %%处理连接消息
 process(Packet = ?CONNECT_PACKET(Var), State0) ->
 
+  io:format("var is ~p~n",[Var]),
   #mqtt_packet_connect{proto_ver  = ProtoVer,
     proto_name = ProtoName,
     username   = Username,
     password   = Password,
     clean_sess = CleanSess,
     keep_alive = KeepAlive,
+    will_topic = WillTopic,
     client_id  = ClientId} = Var,
 
   State1 = State0#proto_state{proto_ver  = ProtoVer,
@@ -119,7 +121,6 @@ process(Packet = ?CONNECT_PACKET(Var), State0) ->
     client_id  = ClientId,
     clean_sess = CleanSess,
     keepalive  = KeepAlive,
-    will_msg   = willmsg(Var),
     connected_at = os:timestamp()},
 
   trace(recv, Packet, State1),
@@ -129,8 +130,7 @@ process(Packet = ?CONNECT_PACKET(Var), State0) ->
       ?CONNACK_ACCEPT ->
         %% Generate clientId if null
         State2 = maybe_set_clientid(State1),%%如果clientId是空,那么生成id,State2与State1比最多差clientId
-        Channels = channel(State2#proto_state.will_msg),%%计算channel
-        io:format("channels is ~p ~n",[Channels]),
+        Channels = channel(WillTopic),%%计算channel
         epush_rabbit:sendMsg(#login{username = Username,password = Password,pid = self(),clientId = ClientId,channel = Channels}),
         start_keepalive(KeepAlive),
         %% ACCEPT
@@ -251,13 +251,9 @@ redeliver({?PUBREL, PacketId}, State) ->
 shutdown(_Error, #proto_state{client_id = undefined}) ->
   ignore;
 
-shutdown(conflict, #proto_state{username = Username,client_id = ClientId}) ->
+shutdown(_Other, #proto_state{username = Username,client_id = ClientId}) ->
   epush_rabbit:sendMsg(#logout{username = Username, pid = self(), clientId = ClientId}),%%unregister
   ignore.
-
-
-willmsg(Packet) when is_record(Packet, mqtt_packet_connect) ->
-  epush_message:from_packet(Packet).
 
 %% Generate a client if if nulll
 maybe_set_clientid(State = #proto_state{client_id = NullId})
@@ -268,12 +264,6 @@ maybe_set_clientid(State = #proto_state{client_id = NullId})
 
 maybe_set_clientid(State) ->
   State.
-
-%%send_willmsg(_ClientId, undefined) ->
-%%  ignore;
-%%send_willmsg(ClientId, WillMsg) ->
-%%  %%epush_pubsub:publish(WillMsg#mqtt_message{from = ClientId}).
-%%  ignore.
 
 start_keepalive(0) -> ignore;
 
@@ -323,9 +313,9 @@ channel(TopicStr) ->
     true ->
       lists:foldl(
         fun(Topic,AccIn) ->
-          [ChannelName,SyncTag] = string:tokens(Topic,","),
+          [ChannelName,SyncTag] = binary:split(Topic,<<",">>),
           maps:put(ChannelName,SyncTag,AccIn)
-        end,maps:new(),string:tokens(TopicStr,";")
+        end,maps:new(),binary:split(TopicStr,<<";">>)
       )
   end.
 

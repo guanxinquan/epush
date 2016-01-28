@@ -25,7 +25,7 @@ start_link(Hosts,VHost,Username,Password) ->
   gen_server:start({local,?MODULE},?MODULE,{Hosts,VHost,Username,Password},[]).
 
 sendMsg(Payload,Publish) ->
-  gen_server:cast(?MODULE,{send,{Payload,Publish}}).
+  gen_server:cast(?MODULE,{send,{term_to_binary(Payload),Publish}}).
 
 sendMsg(Payload) when is_record(Payload,pub)->
   sendMsg(Payload,?PUB(<<"epush-pub">>,<<"epush-pub-queue">>));

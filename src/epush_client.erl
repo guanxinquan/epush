@@ -105,6 +105,7 @@ handle_info({deliver, Message}, State) ->
                    end, State);
 
 handle_info({sync,Channel},State=#client_state{proto_state = ProtoState}) ->%% 来自于服务端有新消息到来时调用的sync
+  lager:info("sync message arrival ~p ~n",[Channel]),
   epush_protocol:send_sync({sync,Channel},ProtoState),
   hibernate(State);
 

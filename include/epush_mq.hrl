@@ -11,30 +11,29 @@
 -record(login,{
   username,
   password,
-  pid,
   clientId,
-  channel
+  channel,
+  pid
 }).
 
 
 -record(sync,{
+  username,
   channel,
   syncTag,
-  username,
   pid
 }).
 
 
 -record(logout,{
   username,
-  pid,
-  clientId
+  clientId,
+  pid
 }).
 
 -record(pub,{
   username,
-  password,
-  pid,
+  channel,
   message,
-  channel
+  pid
 }).

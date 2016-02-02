@@ -215,7 +215,6 @@ publishQos1(Packet = ?PUBLISH_PACKET(?QOS_1, _PacketId), State) ->%%客户端上
       #pub{
         message = Packet#mqtt_packet.payload,
         username = State#proto_state.username,
-        password = State#proto_state.password,
         pid = self(),
         channel = ?TOPIC(Packet)}),%%publish 消息
   with_puback(?PUBACK, Packet, State).

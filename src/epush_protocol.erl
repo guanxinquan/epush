@@ -11,7 +11,7 @@
 -include("epush_mq.hrl").
 
 %% API
--export([init/3, info/1, clientid/1, client/1, session/1]).
+-export([init/3, info/1, clientid/1, client/1, session/1,topic_channel/1]).
 
 -export([received/2, send/2, redeliver/2, shutdown/2]).
 
@@ -190,10 +190,14 @@ process(?PACKET(?DISCONNECT), State) ->
 %% qos0的消息,这里被当作ack的消息
 publishQos0(Packet = ?PUBLISH_PACKET(?QOS_0, _PacketId),
     State = #proto_state{client_id = _ClientId, channels = Channels,username = UserName,flights = Flights,awaiting_rel = AwaitRel}) ->%%客户端上行的Qos0消息,实际上是ack消息
+  lager:info("topic ~p ~n",[?TOPIC(Packet)]),
   {Ch,Tag} = topic_channel(?TOPIC(Packet)),%%通过分析topic,获取ack消息的信息(消息由两部分组成,ch+tag,中间用逗号隔开
+  lager:info("qos 0 message ~p ~n",[{Ch,Tag}]),
+  lager:info("flights ~p ~n",[Flights]),
   case maps:find(Ch,Flights) of %% 先要找到指定的flight消息
     {ok,{FTag,_Msg,_Cnt}} ->
       if Tag =:= FTag ->%% flight消息与ack的消息一致,说明响应的就是这条消息
+
         maps:remove(Ch,Flights),%% 删除flight消息
         NewAwaitRel = cancel_retry(Ch,AwaitRel),%% 删除Retry消息
         NewChannels = update_channel(Ch,Tag,Channels),%% 更新channel的tag值
@@ -322,7 +326,7 @@ topic_channel(Topic) ->
     undefined;
      true ->
       try
-        [ChannelName,SyncTag] = string:tokens(Topic,","),
+        [ChannelName,SyncTag] = binary:split(Topic,<<",">>),
         {ChannelName,SyncTag}
       catch
         _:_ -> {Topic,undefined}
@@ -363,7 +367,7 @@ send_sync({sync,Channel},#proto_state{channels = Channels,username = UserName,fl
 send_message({message,Channel,OTag,NTag,Body},ProtoState=#proto_state{channels = Channels,awaiting_rel = AwaitRel,timeout = Timeout,flights = Flights}) ->
   case check_channel(Channel,OTag,Channels,Flights) of%看看通道上是否有消息,如果没有消息才能发送
     true ->
-      Msg = #mqtt_message{topic = Channel,payload = Body,qos = 0,dup = false},%创建消息
+      Msg = #mqtt_message{topic = <<Channel/binary,<<",">>/binary,NTag/binary>>,payload = Body,qos = 0,dup = false},%创建消息
       TRef = timer(Timeout,{timeout,awaiting_ack,{Channel,NTag}}),%设定重新尝试的时间
       AwaitRel1 = maps:put(Channel,{TRef,NTag},AwaitRel),
       self() ! {deliver,Msg},%发送消息
@@ -387,7 +391,7 @@ resend_message({Ch,Tag},ProtoState=#proto_state{flights = Flights,awaiting_rel =
       AwaitRel1 = maps:put(Ch,{TRef,Tag},AwaitRel),
       self() ! {deliver,Msg},%发送消息
       {ok,ProtoState#proto_state{awaiting_rel = AwaitRel1,flights = maps:put(Ch,{Tag,Msg,2},Flights)}};
-    Other ->
+    _Other ->
       {error,retry_send_error}%%重发次数过多,直接断开连接
   end.
 
@@ -406,7 +410,7 @@ cancel_timer(Ref) ->
     catch erlang:cancel_timer(Ref).
 
 update_channel(Ch,Tag,Channels) ->
-  case maps:is_key(Ch) of
+  case maps:is_key(Ch,Channels) of
     true ->
       maps:update(Ch,Tag,Channels);
     flase ->

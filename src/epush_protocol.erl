@@ -23,7 +23,7 @@
   proto_ver, proto_name, username,
   will_msg, keepalive, max_clientid_len = ?MAX_CLIENTID_LEN,
   session, ws_initial_headers, %% Headers from first HTTP request for websocket client
-  connected_at,authored = false,password,channels,awaiting_rel,timeout=240,flights=maps:new()}).
+  connected_at,authored = false,password,channels,awaiting_rel=maps:new(),timeout=20,flights=maps:new()}).
 
 -type proto_state() :: #proto_state{}.
 
@@ -105,7 +105,6 @@ received(Packet = ?PACKET(_Type), State) ->%其它类型的消息
 %%处理连接消息
 process(Packet = ?CONNECT_PACKET(Var), State0) ->
 
-  io:format("var is ~p~n",[Var]),
   #mqtt_packet_connect{proto_ver  = ProtoVer,
     proto_name = ProtoName,
     username   = Username,
@@ -368,7 +367,7 @@ send_message({message,Channel,OTag,NTag,Body},ProtoState=#proto_state{channels =
       TRef = timer(Timeout,{timeout,awaiting_ack,{Channel,NTag}}),%设定重新尝试的时间
       AwaitRel1 = maps:put(Channel,{TRef,NTag},AwaitRel),
       self() ! {deliver,Msg},%发送消息
-      ProtoState#proto_state{awaiting_rel = AwaitRel1,flights = maps:put(Channel,{NTag,Msg,1})};
+      ProtoState#proto_state{awaiting_rel = AwaitRel1,flights = maps:put(Channel,{NTag,Msg,1},Flights)};
     _ ->
       ProtoState
   end.
@@ -376,19 +375,19 @@ send_message({message,Channel,OTag,NTag,Body},ProtoState=#proto_state{channels =
 
 
 resend_message({Ch,Tag},ProtoState=#proto_state{flights = Flights,awaiting_rel = AwaitRel,timeout = Timeout}) ->
- case maps:find(ch,AwaitRel) of
+ case maps:find(Ch,AwaitRel) of
    {ok,{_Ref,Tag}} ->%% 先删除await
-     maps:remove(ch,AwaitRel);
+     maps:remove(Ch,AwaitRel);
    _ ->
      ok
  end,
-  case maps:find(ch,Flights) of
-    {Tag,Msg,1} ->%% 找到对应的消息
+  case maps:find(Ch,Flights) of
+    {ok,{Tag,Msg,1}} ->%% 找到对应的消息
       TRef = timer(Timeout,{timeout,awaiting_ack,{Ch,Tag}}),%设定重新尝试的时间
       AwaitRel1 = maps:put(Ch,{TRef,Tag},AwaitRel),
       self() ! {deliver,Msg},%发送消息
-      {ok,ProtoState#proto_state{awaiting_rel = AwaitRel1,flights = maps:put(Ch,{Tag,Msg,2})}};
-    _ ->
+      {ok,ProtoState#proto_state{awaiting_rel = AwaitRel1,flights = maps:put(Ch,{Tag,Msg,2},Flights)}};
+    Other ->
       {error,retry_send_error}%%重发次数过多,直接断开连接
   end.
 

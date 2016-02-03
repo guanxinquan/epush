@@ -197,7 +197,7 @@ publishQos0(Packet = ?PUBLISH_PACKET(?QOS_0, _PacketId),
   case maps:find(Ch,Flights) of %% 先要找到指定的flight消息
     {ok,{FTag,_Msg,_Cnt}} ->
       if Tag =:= FTag ->%% flight消息与ack的消息一致,说明响应的就是这条消息
-
+        lager:info("in pub qos 0 "),
         maps:remove(Ch,Flights),%% 删除flight消息
         NewAwaitRel = cancel_retry(Ch,AwaitRel),%% 删除Retry消息
         NewChannels = update_channel(Ch,Tag,Channels),%% 更新channel的tag值
@@ -396,8 +396,9 @@ resend_message({Ch,Tag},ProtoState=#proto_state{flights = Flights,awaiting_rel =
   end.
 
 cancel_retry(Ch,AwaitRel) ->
+  lager:info("cancel retry ~p ~n",[AwaitRel]),
   case maps:find(Ch,AwaitRel) of
-    {ok,TRef} ->
+    {ok,{TRef,_Tag}} ->
       cancel_timer(TRef),
       maps:remove(Ch,AwaitRel);
     error ->

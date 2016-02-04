@@ -190,19 +190,15 @@ process(?PACKET(?DISCONNECT), State) ->
 %% qos0的消息,这里被当作ack的消息
 publishQos0(Packet = ?PUBLISH_PACKET(?QOS_0, _PacketId),
     State = #proto_state{client_id = _ClientId, channels = Channels,username = UserName,flights = Flights,awaiting_rel = AwaitRel}) ->%%客户端上行的Qos0消息,实际上是ack消息
-  lager:info("topic ~p ~n",[?TOPIC(Packet)]),
   {Ch,Tag} = topic_channel(?TOPIC(Packet)),%%通过分析topic,获取ack消息的信息(消息由两部分组成,ch+tag,中间用逗号隔开
-  lager:info("qos 0 message ~p ~n",[{Ch,Tag}]),
-  lager:info("flights ~p ~n",[Flights]),
   case maps:find(Ch,Flights) of %% 先要找到指定的flight消息
     {ok,{FTag,_Msg,_Cnt}} ->
       if Tag =:= FTag ->%% flight消息与ack的消息一致,说明响应的就是这条消息
-        lager:info("in pub qos 0 "),
-        maps:remove(Ch,Flights),%% 删除flight消息
+        NewFlights = maps:remove(Ch,Flights),%% 删除flight消息
         NewAwaitRel = cancel_retry(Ch,AwaitRel),%% 删除Retry消息
         NewChannels = update_channel(Ch,Tag,Channels),%% 更新channel的tag值
         epush_rabbit:sendMsg(#sync{channel = Ch,syncTag = Tag, username = UserName, pid = self()}),
-        {ok,State#proto_state{channels = NewChannels,awaiting_rel = NewAwaitRel}};
+        {ok,State#proto_state{channels = NewChannels,awaiting_rel = NewAwaitRel,flights = NewFlights}};
         true ->%% 否则响应的不适这条消息,直接丢弃
           {ok,State}
       end;
@@ -396,7 +392,6 @@ resend_message({Ch,Tag},ProtoState=#proto_state{flights = Flights,awaiting_rel =
   end.
 
 cancel_retry(Ch,AwaitRel) ->
-  lager:info("cancel retry ~p ~n",[AwaitRel]),
   case maps:find(Ch,AwaitRel) of
     {ok,{TRef,_Tag}} ->
       cancel_timer(TRef),

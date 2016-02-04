@@ -105,17 +105,14 @@ handle_info({deliver, Message}, State) ->
                    end, State);
 
 handle_info({sync,Channel},State=#client_state{proto_state = ProtoState}) ->%% 来自于服务端有新消息到来时调用的sync
-  lager:info("sync message arrival ~p ~n",[Channel]),
   epush_protocol:send_sync({sync,Channel},ProtoState),
   hibernate(State);
 
 handle_info({message,Channel,OTag,NTag,Body},State=#client_state{proto_state = ProtoState}) ->%%来自于服务端的消息发送
-  lager:info("message send to client arraval,~p ~p ~p ~p~n",[Channel,OTag,NTag,Body]),
   NProtoState = epush_protocol:send_message({message,Channel,OTag,NTag,Body},ProtoState),
   hibernate(State#client_state{proto_state = NProtoState});
 
 handle_info({timeout, awaiting_ack, {Ch,Tag}},State = #client_state{proto_state = ProtoState}) ->%%来自于timer
-  lager:info("timeout awaiting ack ,~p ~p ~n",[Ch,Tag]),
   case epush_protocol:resend_message({Ch,Tag},ProtoState) of
     {ok,NProtoState} ->
       hibernate(State#client_state{proto_state = NProtoState});
